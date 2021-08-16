@@ -1,0 +1,742 @@
+---
+title: "07 Time Series Models"
+author: "Eduardo Villarreal"
+date: "13/8/2021"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    fig_width: 7
+    fig_height: 6
+    fig_caption: true
+    df_print: paged
+---
+
+```{r message=FALSE, warning=FALSE}
+
+require(tidyverse)
+require(data.table)
+require(gridExtra) #Libreria para hacer paneles de gráficas con ggplot2
+require(forecast) #Libreria para análisis de series de tiempo
+require(fpp2) #Datos de eries de tiempo
+require(timetk) #To work with time series
+require(modeltime) #To model time series models
+require(tidyquant) #Timeserioes Operarions
+require(hts) #Library for multiple time series data
+require(zoo)
+```
+
+En esta ocasión vamos a utilizar datos de `CoVid19` para predecir la tendencia de nuevos casos de la serie diaria. La fuente de información es `Our World in Data`
+
+```{r}
+#Descargar los datos de CoVid
+covid_wdb = fread('https://covid.ourworldindata.org/data/owid-covid-data.csv')
+
+#crear el campo de Fecha
+covid_wdb$Date = as.Date(covid_wdb$date, format = '%Y-%m-%d')
+head(covid_wdb)
+
+```
+
+# Análisis descriptivo de la serie
+
+La variable a la cual haremos referencia es `new_cases_per_million` y estamos interesados en el total de casos para **México, Colombia, Peru y Brasil**
+
+```{r}
+pais = c('Mexico', 'Colombia', 'Peru', 'Brasil')
+pais_MA = paste(pais, 'MA14', sep = '_')
+
+#Querie para filtrar solo los paises de interés
+MA_covid = covid_wdb %>%
+  filter(location %in% pais) %>%
+  mutate(new_cases = new_cases_per_million) %>%
+  dplyr::select(Date, location, new_cases) %>%
+  spread(location, new_cases, fill = 0)
+
+#Crear Total y solo tomar desde Abril del 2020
+MA_covid$Total = rowSums(MA_covid[, 2 : ncol(MA_covid)])
+MA_covid = MA_covid %>%
+  filter(Date >= '2020-04-01') %>%
+  gather(location, new_cases, 2 : ncol(.))
+
+#Grafica de los casos diarios
+MA_covid %>%
+  ggplot(aes(x = Date, y = new_cases, color = location)) +
+  geom_line() +
+  facet_wrap(~location, scales = 'free', nrow = 1) +
+  theme_bw() +
+  scale_color_viridis_d(begin = 0.2, end = 0.8) +
+  labs(title = 'Covid New cases/million by location') +
+  theme(legend.position = 'bottom')
+```
+
+## Seasonal Decomposition
+
+Como vimos en la introducción, una serie de tiempos es la combinación de 3 elementos:
+
+Nivel
+
+Tendencia
+
+Estacionalidad
+
+$y_t = N_t + T_t + S_t +\epsilon_t$
+
+Ajuste por Estacionalidad
+
+Si removemos el componente estacional de los datos el resultado es una serie desestacionalida:
+
+$y_t - S_t = N_t + T_t + \epsilon_t$ si la series es aditiva y si la series es múltiplicativa, obtenemos:
+
+$\frac{y_t}{S_t} = N_t \times T_t \times \epsilon_t$
+
+Desestacionalizar una serie es útil cuando la variación estacional de la serie no es de interés. Por ejemplo, la tasa mensual de desempleo suele analizarse sin estacionalidad. Por ejemplo, una caída en la tasa de desempleo debido a los trabajos escolares.
+
+Siguiendo con la serie de Covid Total, para ajustar por estacionalidad primero aplicamos la función `decompose` y posteriormente aplicamos la función `seasadj`:
+
+```{r}
+MA_covid = MA_covid %>%
+  spread(location, new_cases, fill = 0)
+
+covid_total = ts(MA_covid$Total, frequency = 7, start = c(2020, 4))
+
+covid_dcomposed = decompose(covid_total)
+autoplot(covid_dcomposed) +
+  theme_bw()
+```
+
+El objeto `covid_decomsed` tiene los componentes de **Tendencia**, **Etacionalidad** y el componente **Aleatorio**. Por ejemplo, para mejorar la visualización de la gráfica, podemos eliminar el ciclo estacional haciendo:
+
+```{r}
+covid_dcomposed = seasadj(covid_dcomposed)
+autoplot(covid_dcomposed) +
+  theme_bw() +
+  labs(title = 'Serie Covid Total Desestacionalizada')
+```
+
+En este caso estamos observando la serie $z_t = y_t - S_t$; es decir, el componente de tendencia y error aleatorio.
+
+Si quisiéramos observar la tendencia de la serie, podemos extraer la tendencia como:
+
+```{r}
+covid_dcomposed = decompose(covid_total)
+covid_trend = covid_dcomposed$trend
+autoplot(covid_trend) +
+  theme_bw() +
+  labs(title = 'Tendencia Serie Covid Total')
+```
+
+## Moving Average Smoothing
+
+Otra forma de visualizar la serie es utilizando **Moving Averages**.
+
+Este tipo de computos se refiere a ventanas de tiempo bajo las cuales se calcula algún tipo de estadístico como la media la desviación estándar o la correlación entre dos series de tiempo. Un ejemplo es el cómputo de Media Móvil o MA(L):
+
+$MA(L) = \frac{1}{L}\sum_{t=1}^L X_t$
+
+```{r}
+MA_smooth = MA_covid %>%
+  select(Date, Total) %>%
+  tq_mutate(
+    select = Total,
+    mutate_fun = rollapply,
+    width = 20,
+    FUN = mean,
+    col_rename = 'MA20') %>%
+  tq_mutate(
+    select = Total,
+    mutate_fun = rollapply,
+    width = 50,
+    FUN = mean,
+    col_rename = 'MA50')
+
+#Graficar
+MA_smooth %>%
+  ggplot(aes(x = Date, y = Total)) +
+  geom_line(alpha = 0.6, col = 'grey50') +
+  geom_line(aes(y = MA20), size = 1, col = 'blue') +
+  geom_line(aes(y = MA50), size = 1, col = 'red') +
+  theme_bw() +
+  labs(title = 'Suavisamiento con MA20 y MA50')
+
+```
+
+En este caso, estamos usando un `MA(20)` como una medida de la tendencia a **corto plazo** y un `MA(50)` como una medida de **largo plazo**. Lo interesante de estos patrones son los **cruces** entre las dos líneas:
+
+1.  Cuando MA(20) \> MA(50); la tendencia de casos es a la alza
+
+2.  Cuando MA(20) \> MA(50); la tendencia de casos es a la baja
+
+3.  cuando MA(20) = MA(50) hay un cambio de tendencia
+
+Lo que podemos ver acá es que nuestro MA(50) empieza a tener un **momentum** negativo acelerado, indicando una posible 5ta ola de contagios en la región de interés.
+
+## Caso particular de México
+
+Ahora vamos a hacer el caso particular de México
+
+```{r}
+MA_smooth = MA_covid %>%
+  select(Date, Mexico) %>%
+  tq_mutate(
+    select = Mexico,
+    mutate_fun = rollapply,
+    width = 21,
+    FUN = mean,
+    col_rename = 'MA_short') %>%
+  tq_mutate(
+    select = Mexico,
+    mutate_fun = rollapply,
+    width = 21 * 3,
+    FUN = mean,
+    col_rename = 'MA_long')
+
+#Graficar
+MA_smooth %>%
+  ggplot(aes(x = Date, y = Mexico)) +
+  geom_line(alpha = 0.6, col = 'grey50') +
+  geom_line(aes(y = MA_short), size = 1, col = 'blue') +
+  geom_line(aes(y = MA_long), size = 1, col = 'red') +
+  theme_bw() +
+  labs(title = 'Suavisamiento con MA_short y MA_long')
+
+```
+
+**Qué podemos observar del comportamiento en la 3ra ola?**
+
+## STL Decomposition
+
+**STL** es un acrónimo de **Seasonal and Trend decomposition using LOESS** en dondo **LOESS** es un método para estimar relaciones no lineales que usa **regression splins** para ajustarse en forma adaptativa.
+
+**STL** tiene muchas ventajas:
+
+1.  Puede manejar cualquier tipo de estacionalidad: diaria, semanal, anual, etc.
+
+2.  El componente estacional es adaptativo en el tiempo
+
+3.  Es robusto ante la presencia de outliers
+
+Hay dos parámetros que debe poner el usiario: `t.window` (trend-cycle window) y `s.window` (seasonal window). Estos dos parámetros controlan qué tan rápido pueden adaptarse ambos componentes. Valores pequeños permiten cambios más rápidos. Ambos valores deben ser **impares**.
+
+Una interpretación más precisa de ambos parámetros es `t.window`es el número de observaciones consecutivas utilizadas para estimar el componente de ciclo-tendencia.
+
+```{r}
+MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  mstl() %>%
+  autoplot()
+```
+
+Observe cómo, a diferencia de `decompose`, el componente estacional varia a lo largo del tiempo.
+
+Si quisieramos ajustar los datos eliminando la estacionalidad, podemos hacer $z_t = y_t - S_t$:
+
+```{r}
+seasonal_eff = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  mstl()
+
+#Seasonal djusted series
+seas_adj = MA_covid$Total - seasonal_eff[, 3]
+autoplot(seas_adj) +
+  theme_bw() +
+  labs(title = 'Seasonal adj Series using STL')
+
+```
+
+Y si quisieramos observar la tendencia, podemos hacer:
+
+```{r}
+seas_adj = MA_covid$Total - seasonal_eff[, 3] - seasonal_eff[, 4]
+autoplot(seas_adj) +
+  theme_bw() +
+  labs(title = 'Trend Component Series using STL')
+```
+
+### Qué tan fuerte es la Tendencia y la Estacionalidad?
+
+Para datos con una tendencia muy fuerte los datos ajustados por estacionalidad deben tener mucha más varianza que el componente aleatorio. Así, el ratio $\text{Var}(\epsilon_t) / \text{Var}(T_t + \epsilon_t)$ debería ser relativamente pequeño. Para datos con poca o nula tendencia ambas variazas deberian ser aproximadamente iguales. Entonces definimos la fuerza de la tendencia $F_t$ como:
+
+$F_T = max(0, 1 - \frac{\text{Var}(\epsilon_t)}{\text{Var}(T_t + \epsilon_t)})$
+
+De manera similar podemos definir la fortaleza del factor estacional como:
+
+$F_S = max(0, 1 - \frac{\text{Var}(\epsilon_t)}{\text{Var}(S_t + \epsilon_t)})$
+
+```{r}
+#Funcion para definir la fortaleza de la Tendencia y la Estacionalidad
+
+FT_strenght = function(data, freq = 12){
+  x = data
+  x = ts(x, frequency = freq)
+  
+  #Time Series decomposition using STL
+  x_decompose = mstl(x)
+  trend_t = x_decompose[, 2]
+  season_t = x_decompose[, 3]
+  reminder_t = x_decompose[, 4]
+  
+  #Strength of a Trend
+  F_Trend = var(reminder_t) / var(trend_t + reminder_t)
+  F_Trend = max(0, 1 - F_Trend)
+  
+  return(F_Trend)
+}
+
+
+FS_strenght = function(data, freq = 12){
+  x = data
+  x = ts(x, frequency = freq)
+  
+  #Time Series decomposition using STL
+  x_decompose = mstl(x)
+  trend_t = x_decompose[, 2]
+  season_t = x_decompose[, 3]
+  reminder_t = x_decompose[, 4]
+  
+  #Strength of a Seasonal 
+
+  
+  F_Season = var(reminder_t) / var(season_t + reminder_t)
+  F_Season = max(0, 1 - F_Season)
+  
+  return(F_Season)
+}
+
+#Caso particular de Covid total
+FS_strenght(MA_covid$Total, freq = 7)
+FT_strenght(MA_covid$Total, freq = 7)
+
+#Caso de todas las series
+sapply(MA_covid[, 2 : ncol(MA_covid)], FS_strenght)
+sapply(MA_covid[, 2 : ncol(MA_covid)], FT_strenght)
+```
+
+Esto es muy útil cuando queremos detectar en un conjunto de series de tiempo quiénes tienen Tendecia y Estacionalidad fuerte.
+
+## Descomposición Estacional con Series de Fourier
+
+Una serie de Fourier es una serie infinita que converge puntualmente a una función periódica y continua a trozos (o por partes). Las series de Fourier constituyen la herramienta matemática básica del análisis de Fourier empleado para analizar funciones periódicas a través de la descomposición de dicha función en una suma infinita de funciones sinusoidales mucho más simples (como combinación de senos y cosenos con frecuencias enteras).
+
+El nombre se debe al matemático francés Jean-Baptiste Joseph Fourier, que desarrolló la teoría cuando estudiaba la ecuación del calor. Fue el primero que estudió tales series sistemáticamente, y publicó sus resultados iniciales en 1807 y 1811. Esta área de investigación se llama algunas veces análisis armónico.
+
+Las series de Fourier tienen la forma:
+
+$y_t = \sum_{k=1}^K \left[\gamma_k \sin\left(\textstyle\frac{2\pi t k}{m}\right) \psi_k\cos\left(\textstyle\frac{2\pi t k}{m}\right)\right]$
+
+En donde $1 < K < m/2$. Mientras más grande es el valor de $K$ el componente estacional es más complejo. El valor óptimo de $K$ puede estimase minimizando algún criterio como **AIC** o **leave-one-out CV**
+
+La función `fourier()` puede usarse para estimar la serie de fourier:
+
+```{r}
+#Estimación de la serie de fourier
+Fourier = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  fourier(K = 2) %>%
+  as.data.frame()
+
+#Estimacion de los coeficientes de Fourier usando regresión lineal
+temp = Fourier
+temp$y = MA_covid$Total
+seasonal_model = lm(y ~., data = temp)
+
+#Seasonal component
+temp$seasonal = seasonal_model$fitted.values
+
+#graficar el componente esacional
+plot(temp$seasonal, type = 'l')
+
+
+```
+
+### Descomposición con Regresión Lineal y Series de Fourier
+
+Podemos ahora descomponer la serie como:
+
+$y_t = \alpha + \beta t + \sum_{k=1}^K \left[\gamma_k \sin\left(\textstyle\frac{2\pi t k}{m}\right) \psi_k\cos\left(\textstyle\frac{2\pi t k}{m}\right)\right] + \varepsilon_t$
+
+```{r}
+#Estimat con Regresión lineal
+
+temp = MA_covid %>%
+  select(Date, Total) %>%
+  mutate(Trend = 1 : nrow(.))
+
+#Estimacion de Series de Fourier
+Fourier = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  fourier(K = 2) %>%
+  as.data.frame()
+
+#Aumentar el data frame
+temp = bind_cols(temp, Fourier)
+head(temp)
+
+#Modelo de Regresión
+model_decompose = lm(Total ~., data = temp[, -1])
+summary(model_decompose)
+
+```
+
+Ahora podemos descomponer la serie:
+
+```{r}
+
+trend = coef(model_decompose)[1] + coef(model_decompose)['Trend'] * temp$Trend
+season = temp$Total - trend - residuals(model_decompose)
+
+
+components = cbind(
+  time = temp$Trend,
+  data = temp$Total,
+  trend = trend,
+  season = season,
+  reminder = residuals(model_decompose))
+
+#graficar
+components %>%
+  as.data.frame() %>%
+  gather(Series, Value, 2 : ncol(.)) %>%
+  ggplot(aes(x = time, y = Value)) +
+  geom_line() +
+  facet_wrap(~Series, scales = 'free', ncol = 1)
+
+```
+
+Podemos tambien mejorar la tendencia utilizando **splines**
+
+Podemos particionar el tiempo (la tendencia) en 3 momentos diferentes, definidos arbitrariamente como $Q_1, Q_2, Q_3$ que representan el quartil 1, 2 y 3 respectivamente:
+
+```{r}
+summary(temp$Trend)
+```
+
+Nuestra partición quearía como `c(126, 251, 376)` y usamos el concepto de **Cubic Splin** para ajustar la tendencia:
+
+```{r}
+
+temp = MA_covid %>%
+  select(Date, Total) %>%
+  mutate(Trend = 1 : nrow(.))
+
+#compute Fourier Series
+Fourier = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  fourier(K = 2) %>%
+  as.data.frame()
+temp = bind_cols(temp, Fourier)
+
+require(splines)
+#compute Trend using basis functions
+m2 = lm(Total ~ bs(Trend, knots = c(126, 251,376)) - 1, data = temp)
+Trend = m2$fitted.values
+summary(m2)
+
+#Decompose the time series:
+temp$Trend = Trend
+temp$seq = 1 : nrow(temp)
+model_decompose2 = lm(Total ~., data = temp[, -1])
+
+
+trend = coef(model_decompose2)[1] + coef(model_decompose2)['Trend'] * temp$Trend
+season = temp$Total - trend - residuals(model_decompose2)
+
+
+components = cbind(
+  time = temp$seq,
+  data = temp$Total,
+  trend = trend,
+  season = season,
+  reminder = residuals(model_decompose2))
+
+#graficar
+components %>%
+  as.data.frame() %>%
+  gather(Series, Value, 2 : ncol(.)) %>%
+  ggplot(aes(x = time, y = Value)) +
+  geom_line() +
+  facet_wrap(~Series, scales = 'free', ncol = 1)
+```
+
+# Forecast con Regresión Lineal
+
+El enfoque más directo para modelar y proectar series de tiempo es la **regresión lineal**. Podemos escribir una series de tiempos $y_t$ como:
+
+$y_t = \beta_0 + \beta_1 T_t + \sum_{s=1}^S \phi_s S_t +\varepsilon_t$
+
+En donde $S_t$ es el componente estacional que en el caso más sencillo es una variabel **dummy**. Para más detalles sobre regresión y variabels dummy pudes revisar <https://rpubs.com/blad0914>.
+
+El paquete `forecast` trae consigo la función `tslm` que acepta una formula como objeto y estima los coeficientes de regresión.
+
+```{r}
+covid_total = MA_covid$Total %>%
+  ts(frequency = 7)
+
+m_lm = tslm(covid_total ~ trend + season)
+summary(m_lm)
+```
+
+Es importate notar que `trend` y `season` son creados en automático por la función `tslm`. Con el modelo ya calibrado, ahora, podemos hacer un forecast con la función `furecast` para los siguientes 12 dias:
+
+```{r}
+fcs_lm = forecast(m_lm, h = 12)
+fcs_lm
+
+autoplot(fcs_lm) +
+  theme_bw()
+
+```
+
+Y también podemos computar los métricos de frecast accuracy con la función `accuracy`:
+
+```{r}
+accuracy(m_lm)
+```
+
+Para llevar un registro de los distintos pronósticos que vamos a hacer, vamos a crear un Data Frame de resultados con la fecha, los datos actuales y los estimados:
+
+```{r}
+FCS_Results = MA_covid %>%
+  select(Date, Total) %>%
+  mutate(m_lm = m_lm$fitted.values)
+```
+
+Un aspecto importante del forecast es que hay algunos supuestos que deben cumplir los residuales:
+
+1.  los residuales $\varepsilon_t$ deben ser $\text{NID}(0, \sigma^2)$
+
+2.  los residuales no deben estar **autocorrelacionados**
+
+Para revisar estos dos spuestos podemos hacer:
+
+```{r}
+checkresiduals(m_lm)
+```
+
+Aún cuando la distribución de los residuales parece seguir una forma **gausiana** vemos que en el tiempo no siguen un patrón de ruido blanco y la función de **autocorrelación** o **ACF** muestra que existe autocorrelación significativa.
+
+Este es un problema común cuando queremos modelar series de tiempo con regresión lineal.
+
+# Forecast con Descomposición STL
+
+Una de las ventajas de la descomposición **STL** es que podemos hacer un forecast de una manera relativamente directa:
+
+```{r}
+m_stl = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  mstl()
+
+#Hacer el forecast
+fcs_stl = forecast(m_stl, h = 12)
+autoplot(fcs_stl)
+
+#Revisar los residuales
+checkresiduals(fcs_stl)
+
+#Gardar el valor ajustado
+FCS_Results$m_stl = fcs_stl$fitted
+
+#Computar accuracy
+accuracy(fcs_stl)
+```
+
+# Forecasting con Suavisamiento Exponencial
+
+El **Suavisamiento Exponencial** es una técnica utilizada desde 1957 creada por **Holt**, **Brown** y **Winters**.
+
+## Suavisamiento Exponencial Simple (SES)
+
+El caso más sencillo es el **suavisamiento exponencial simple**. Este método es adecuado cuando no hay tendencia y estacionalidad.
+
+El forecast en el tiempo $T+1$ puede escribirse como:
+
+$\hat{y}_{T+1|t} = \alpha y_T + (1-\alpha) \hat{y}_{T|T-1}$
+
+en donde el parámetro de suavisamiento $0 < \alpha < 1$
+
+Si $\ell_{t}$ es el nivel de la serie en el tiempo $t$, entonces podemos escribir el modelo en forma estructural como:
+
+$\text{Forecast:   } \hat{y}_{t+h|t} = \ell_{t}$
+
+$\text{Smoothing equation:   } \ell_{t} = \alpha y_{t} + (1 - \alpha)\ell_{t-1}$
+
+### Estimación del modelo
+
+Para estimar el modelo son necesarion métodos de óptimización no lineal con restricciones. Pero en **R** podemos hacerlo con la libreria `forecast` a través de la función `ses`:
+
+```{r}
+m_ses = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  ses(h = 12)
+summary(m_ses)
+```
+
+En este caso, el problema de optimización tiene que lidear con 2 valores para estimar:
+
+1.  El valor del parámetro de suavizamiento, que en este caso es $\alpha = 0.1576$
+
+2.  El valor inicial $\ell_0 = 19.90$
+
+### Forecasting con el modelo SES
+
+Una vez estimado el modelo, podemos hacer el pronóstico:
+
+```{r}
+fcs_ses = forecast(m_ses)
+autoplot(fcs_ses)
+```
+
+Es importante que por definición matemática el valor pronósticado es y será siempre constante.
+
+Ahora podemos registrar el valor estimado y analizar los reidales
+
+```{r}
+FCS_Results$m_ses = fcs_ses$fitted
+checkresiduals(m_ses)
+```
+
+## Suavisamiento de Holt
+
+Podemos ahora incluir el componente de tendencia:
+
+$\text{Forecast equation:   } \hat{y}_{t+h|t} = \ell_{t} + hb_{t}$
+
+$\text{Level equation:   }\ell_{t} = \alpha y_{t} + (1 - \alpha)(\ell_{t-1} + b_{t-1})$
+
+$\text{Trend equation:   }b_{t} = \beta^*(\ell_{t} - \ell_{t-1}) + (1 -\beta^*)b_{t-1}$
+
+Para asegurar **estacionariedad** los valores de $0 < \alpha < 1$ y $0 < \beta < 1$
+
+Igual que el caso anterior, podemos estimar y hacer el forecast para los siguientes 12 dias:
+
+```{r}
+m_holt = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  holt(h = 12)
+summary(m_holt)
+```
+
+Ahora notemos que existen 4 estimaciones: $\alpha = 0.113$, $\beta = 0.021$ y $\ell_0 = 5.93, b_0 = 2.07$.
+
+El forecast y el análisis de los residuales es:
+
+```{r}
+fcs_holt = forecast(m_holt)
+FCS_Results$m_holt = fcs_holt$fitted
+autoplot(fcs_holt)
+checkresiduals(m_holt)
+```
+
+# Suavisamiento Exponencial de Holt-Winters
+
+Ahora vamos a incluir el tercer componente $S_t$:
+
+$\hat{y}_{t+h|t} = \ell_{t} + hb_{t} + s_{t+h-m(k+1)}$
+
+$\ell_{t} = \alpha(y_{t} - s_{t-m}) + (1 - \alpha)(\ell_{t-1} + b_{t-1})$
+
+$b_{t} = \beta^*(\ell_{t} - \ell_{t-1}) + (1 - \beta^*)b_{t-1}$
+
+$s_{t} = \gamma (y_{t}-\ell_{t-1}-b_{t-1}) + (1-\gamma)s_{t-m}$
+
+De la misma forma, los parámetros a estimar del modelo están restringidos para asegurar estacionariedad. Para hacer la estimacón del modelo usamos la función `hw`:
+
+```{r}
+m_hw = MA_covid$Total %>%
+  ts(frequency = 7) %>%
+  hw(h = 12, seasonal = 'additive')
+summary(m_hw)
+```
+
+El forecast para los siguientes 12 dias es:
+
+```{r}
+fcs_hw = forecast(m_hw)
+autoplot(fcs_hw)
+FCS_Results$m_hw = fcs_hw$fitted
+checkresiduals(fcs_hw)
+```
+
+# Recapitulación de los métodos revisados
+
+Ahora es un bue momento para recapitular y ver cómo los modelos se comportan. Para esto vamos a hacer una gráfica del Actual y los valores ajustados:
+
+```{r}
+FCS_Results %>%
+  ggplot(aes(x = Date, y = Total)) +
+  geom_line(color = 'grey80') +
+  geom_line(aes(y = m_lm), color = 'red', lty = 2) +
+  geom_line(aes(y = m_stl), color = 'darkred') +
+  geom_line(aes(y = m_ses), color = 'darkorange') +
+  geom_line(aes(y = m_holt), color = 'darkblue') +
+  geom_line(aes(y = m_hw), color = 'green') +
+  theme_bw()
+```
+
+Y ahora vamos a imprimir el accuracy de cada uno de ellos:
+
+```{r}
+fcs_acc = rbind(accuracy(m_lm), 
+      accuracy(m_ses),
+      accuracy(m_holt),
+      accuracy(m_hw))
+
+#Convert to Dataframe
+fcs_acc = as.data.frame(fcs_acc)
+fcs_acc$model = c('lm', 'ses', 'holt', 'hw')
+fcs_acc
+
+```
+
+Cual modelo utilizarías para hacer el pronóstico?
+
+# El engaño de tomar el 100% de los datos
+
+En realidad, para que la competencia sea justa y equilibrada, los modelos deberían competir con datos cigos que nunca han visto.
+
+Ahora vamos a poner a competir el modelo de **holt-winter** con un **MAPE = 32%** contra el modelo de **holt** que tiene un **MAPE = 28%** que en teoría es el que menor error absoluto porcentual tiene. Para esto, vamos a dejar el 95% de los datos para entrenar el modelo y el 5%% para validarlo:
+
+```{r}
+#Crear el training (476 obs) y test set (25 obs)
+full_set = ts(MA_covid$Total, frequency = 7)
+train_set = subset(full_set, end = length(full_set) - 25)
+test_set = subset(full_set, start = length(full_set) - 24)
+
+
+#Computar los modelos con el training set
+
+#Holt
+m_holt = train_set %>%
+  holt(h = 25)
+
+m_holt %>%
+  forecast(h = 25) %>%
+  autoplot() + autolayer(test_set) +
+  theme_bw()
+
+#Holt-Winters
+m_hw = train_set %>%
+  hw(h = 25)
+
+m_hw %>%
+  forecast(h = 25) %>%
+  autoplot() + autolayer(test_set) +
+  theme_bw()
+
+#Accuracy en Test Set para holt
+accuracy(m_holt, test = test_set)
+
+#Accuracy en Test Set para HW
+accuracy(m_hw, test = test_set)
+
+
+
+```
+
+Ahora lo que observamos es que el Holt-Winter con un 34% en el test set supera al modelo de Holt el cual tiene un 47% de error.
+
+# Bibliografia
+
+<https://otexts.com/fpp2/>
